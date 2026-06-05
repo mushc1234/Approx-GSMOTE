@@ -72,21 +72,49 @@ module window_slot #(
     // After each piece, re-run `make` -- progressively more checks pass.
     // ===================================================================
 
-    assign resident_valid = 1'b0;
+
+    automatic logic signed [D*IN_WIDTH-1:0] resident_data_r;
 
     always @(posedge clk) begin
-        if (rst_n) begin
+        if (!rst_n) begin
             resident_valid <= 0;
+            resident_idx   <= '0;
+            resident_data_r <= '0;
         end
         else begin
-            if(load_valid)
-                resident_valid <= 1;
+            if (load_valid) begin
+                resident_valid  <= 1;
+                resident_idx    <= load_idx;
+                resident_data_r <= load_data;
+            end
         end
     end
 
-    assign resident_idx   = '0;
-    assign best_idx       = '0;
-    assign best_dist      = '0;
-    assign cmp_dist       = '0;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            best_idx  <= '0;
+            best_dist <= {ACC_WIDTH{1'b1}};  // max unsigned value as sentinel
+        end
+        else begin
+            if (arrival_valid && resident_valid) begin
+                if (cmp_dist < best_dist) begin
+                    best_dist <= cmp_dist;
+                    best_idx  <= arrival_idx;
+                end
+            end
+        end
+    end
+
+    always_comb begin
+        cmp_dist = '0;
+        for (int k = 0; k < D; k++) begin
+            automatic logic signed [IN_WIDTH:0]   diff;     // IN_WIDTH+1 bits, signed
+            automatic logic        [2*IN_WIDTH-1:0] sq;     // 2*IN_WIDTH bits, unsigned
+            diff = $signed(resident_data_r[(k+1)*IN_WIDTH-1 -: IN_WIDTH])
+                - $signed(arrival_data   [(k+1)*IN_WIDTH-1 -: IN_WIDTH]);
+            sq   = diff * diff;                              // signed*signed -> nonneg result
+            cmp_dist = cmp_dist + ACC_WIDTH'(sq);
+        end
+    end
 
 endmodule
