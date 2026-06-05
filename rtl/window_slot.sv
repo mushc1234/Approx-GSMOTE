@@ -73,6 +73,17 @@ module window_slot #(
     // ===================================================================
 
     assign resident_valid = 1'b0;
+
+    always @(posedge clk) begin
+        if (rst_n) begin
+            resident_valid <= 0;
+        end
+        else begin
+            if(load_valid)
+                resident_valid <= 1;
+        end
+    end
+
     assign resident_idx   = '0;
     assign best_idx       = '0;
     assign best_dist      = '0;
