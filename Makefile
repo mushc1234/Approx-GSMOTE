@@ -1,42 +1,79 @@
-# Makefile -- Verilator build for window_slot testbench
+# Makefile -- Verilator builds for sigwin engine testbenches
 #
-#   make           build and run the testbench
-#   make wave      same, then open GTKWave on the produced VCD
-#   make clean     wipe build artefacts
+#   make                           build + run all testbenches
+#   make window_slot               build + run only tb_window_slot
+#   make distance_unit             build + run only tb_distance_unit
+#   make wave_<name>               run, then open the VCD in gtkwave
+#   make clean                     wipe build artefacts
 #
-# Requires verilator (>= 4.200 recommended) on PATH. Optional: gtkwave.
+#   make distance_unit GOLDEN=path/to/golden    # override golden dir
+#
+# Requires verilator (>= 4.200) on PATH. Optional: gtkwave for waves.
 
 VERILATOR := verilator
 VFLAGS    := --cc --exe --build -j 0 --trace
 
-TOP   := window_slot
-RTL   := rtl/window_slot.sv
-TB    := tb/tb_window_slot.cpp
-BIN   := obj_dir/V$(TOP)
+GOLDEN ?= ./golden
 
-.PHONY: all run wave clean help
+.PHONY: all clean help \
+        window_slot distance_unit \
+        wave_window_slot wave_distance_unit
 
-all: run
+all: window_slot distance_unit
 
-# Verilator builds with one invocation (-build runs make for us)
-$(BIN): $(RTL) $(TB)
-	$(VERILATOR) $(VFLAGS) --top-module $(TOP) $(RTL) $(TB)
+# ----------------------------------------------------------------------
+# Per-testbench build rules. Each gets its own obj_dir so they don't
+# stomp on each other.
+# ----------------------------------------------------------------------
 
-run: $(BIN)
-	./$(BIN)
+obj_dir_window_slot/Vwindow_slot: rtl/window_slot.sv tb/tb_window_slot.cpp
+	$(VERILATOR) $(VFLAGS) --top-module window_slot \
+		--Mdir obj_dir_window_slot \
+		rtl/window_slot.sv tb/tb_window_slot.cpp
 
-wave: run
+obj_dir_distance_unit/Vdistance_unit: rtl/distance_unit.sv tb/tb_distance_unit.cpp
+	$(VERILATOR) $(VFLAGS) --top-module distance_unit \
+		--Mdir obj_dir_distance_unit \
+		rtl/distance_unit.sv tb/tb_distance_unit.cpp
+
+window_slot: obj_dir_window_slot/Vwindow_slot
+	./obj_dir_window_slot/Vwindow_slot
+
+distance_unit: obj_dir_distance_unit/Vdistance_unit
+	./obj_dir_distance_unit/Vdistance_unit --golden $(GOLDEN)
+
+# ----------------------------------------------------------------------
+# Waveform viewing
+# ----------------------------------------------------------------------
+
+wave_window_slot: window_slot
 	@if command -v gtkwave > /dev/null 2>&1; then \
 	    gtkwave waves.vcd & \
 	else \
-	    echo "(gtkwave not installed; waveform saved to waves.vcd)"; \
+	    echo "(gtkwave not installed; waveform at waves.vcd)"; \
 	fi
 
+wave_distance_unit: distance_unit
+	@if command -v gtkwave > /dev/null 2>&1; then \
+	    gtkwave waves_distance_unit.vcd & \
+	else \
+	    echo "(gtkwave not installed; waveform at waves_distance_unit.vcd)"; \
+	fi
+
+# ----------------------------------------------------------------------
+# Utility
+# ----------------------------------------------------------------------
+
 clean:
-	rm -rf obj_dir waves.vcd
+	rm -rf obj_dir_* waves*.vcd
 
 help:
 	@echo "Targets:"
-	@echo "  make           build and run the testbench"
-	@echo "  make wave      same, plus open GTKWave"
-	@echo "  make clean     remove obj_dir/ and waves.vcd"
+	@echo "  make                   build + run all testbenches"
+	@echo "  make window_slot       just the window slot test"
+	@echo "  make distance_unit     just the distance unit test, golden vectors generated seperately"
+	@echo "  make wave_<name>       run a test, open VCD in gtkwave"
+	@echo "  make clean             remove all build artefacts"
+	@echo ""
+	@echo "  GOLDEN=path/to/golden  point distance_unit at a different"
+	@echo "                          golden directory (default: ./golden)"
