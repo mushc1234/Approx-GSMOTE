@@ -26,10 +26,14 @@ all: window_slot distance_unit
 # stomp on each other.
 # ----------------------------------------------------------------------
 
-obj_dir_window_slot/Vwindow_slot: rtl/window_slot.sv tb/tb_window_slot.cpp
+obj_dir_window_slot/Vwindow_slot: \
+		rtl/window_slot.sv rtl/distance_unit.sv \
+		tb/tb_window_slot.cpp
 	$(VERILATOR) $(VFLAGS) --top-module window_slot \
 		--Mdir obj_dir_window_slot \
-		rtl/window_slot.sv tb/tb_window_slot.cpp
+		rtl/window_slot.sv rtl/distance_unit.sv \
+		tb/tb_window_slot.cpp
+
 
 obj_dir_distance_unit/Vdistance_unit: rtl/distance_unit.sv tb/tb_distance_unit.cpp
 	$(VERILATOR) $(VFLAGS) --top-module distance_unit \

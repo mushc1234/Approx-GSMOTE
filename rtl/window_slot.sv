@@ -55,28 +55,34 @@ module window_slot #(
     output logic [ACC_WIDTH-1:0]              best_dist,
 
     // Distance to current arrival (combinational, valid when arrival_valid)
-    output logic [ACC_WIDTH-1:0]              cmp_dist
+    output logic [ACC_WIDTH-1:0]              cmp_dist,
+    output logic                              cmp_valid,
+    output logic [IDX_WIDTH*2-1:0]            cmp_tag
 );
 
-    // ===================================================================
-    // STUB IMPLEMENTATION
-    //
-    // All outputs are driven to zero so the design compiles. Every check
-    // in the testbench should FAIL on the first build -- that's how you
-    // know the toolchain works. Replace this stub piece by piece:
-    //
-    //   1. Resident latch (gives you `resident_valid` and `resident_idx`)
-    //   2. Combinational distance unit (gives you `cmp_dist`)
-    //   3. Running-best update (gives you `best_idx` and `best_dist`)
-    //
-    // After each piece, re-run `make` -- progressively more checks pass.
-    // ===================================================================
+    logic signed [D*IN_WIDTH-1:0] resident_data_r;
 
+    distance_unit #(
+        .D(D),
+        .IN_WIDTH(IN_WIDTH),
+        .ACC_WIDTH(ACC_WIDTH),
+        .TAG_WIDTH(IDX_WIDTH*2)
+    ) dist_unit (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_valid(arrival_valid && resident_valid && !load_valid),
+        .in_a(resident_data_r),
+        .in_b(arrival_data),
+        .in_tag({resident_idx, arrival_idx}),
+        .out_valid(cmp_valid),
+        .out_tag(cmp_tag),
+        .out_dist(cmp_dist)
+    );
 
-    automatic logic signed [D*IN_WIDTH-1:0] resident_data_r;
-
-    always @(posedge clk) begin
+    always_ff @(posedge clk) begin
         if (!rst_n) begin
+            best_idx  <= '0;
+            best_dist <= {ACC_WIDTH{1'b1}};  // max unsigned value as sentinel
             resident_valid <= 0;
             resident_idx   <= '0;
             resident_data_r <= '0;
@@ -86,35 +92,17 @@ module window_slot #(
                 resident_valid  <= 1;
                 resident_idx    <= load_idx;
                 resident_data_r <= load_data;
+                best_dist       <= {ACC_WIDTH{1'b1}};  // reset to sentinel
+                best_idx        <= '0;
             end
-        end
-    end
-
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            best_idx  <= '0;
-            best_dist <= {ACC_WIDTH{1'b1}};  // max unsigned value as sentinel
-        end
-        else begin
-            if (arrival_valid && resident_valid) begin
+            else if (cmp_valid && resident_valid && cmp_tag[IDX_WIDTH*2-1:IDX_WIDTH] == resident_idx) begin
                 if (cmp_dist < best_dist) begin
                     best_dist <= cmp_dist;
-                    best_idx  <= arrival_idx;
+                    best_idx  <= cmp_tag[IDX_WIDTH-1:0];
                 end
             end
         end
     end
 
-    always_comb begin
-        cmp_dist = '0;
-        for (int k = 0; k < D; k++) begin
-            automatic logic signed [IN_WIDTH:0]   diff;     // IN_WIDTH+1 bits, signed
-            automatic logic        [2*IN_WIDTH-1:0] sq;     // 2*IN_WIDTH bits, unsigned
-            diff = $signed(resident_data_r[(k+1)*IN_WIDTH-1 -: IN_WIDTH])
-                - $signed(arrival_data   [(k+1)*IN_WIDTH-1 -: IN_WIDTH]);
-            sq   = diff * diff;                              // signed*signed -> nonneg result
-            cmp_dist = cmp_dist + ACC_WIDTH'(sq);
-        end
-    end
 
 endmodule
