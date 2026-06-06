@@ -42,6 +42,8 @@ module window_slot #(
     input  logic                              load_valid,
     input  logic [IDX_WIDTH-1:0]              load_idx,
     input  logic [D*IN_WIDTH-1:0]             load_data,
+    input  logic [IDX_WIDTH-1:0]              load_best_idx,
+    input  logic [ACC_WIDTH-1:0]              load_best_dist,
 
     // Arrival broadcast port
     input  logic                              arrival_valid,
@@ -92,8 +94,8 @@ module window_slot #(
                 resident_valid  <= 1;
                 resident_idx    <= load_idx;
                 resident_data_r <= load_data;
-                best_dist       <= {ACC_WIDTH{1'b1}};  // reset to sentinel
-                best_idx        <= '0;
+                best_dist       <= load_best_dist;
+                best_idx        <= load_best_idx; 
             end
             else if (cmp_valid && resident_valid && cmp_tag[IDX_WIDTH*2-1:IDX_WIDTH] == resident_idx) begin
                 if (cmp_dist < best_dist) begin
