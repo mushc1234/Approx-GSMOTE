@@ -64,6 +64,15 @@ module arrival_aggregator #(
     end
 
     // -----------------------------------------------------------------
+    // "any input valid" OR-reduction, then register the output.
+    // -----------------------------------------------------------------
+    logic any_valid_in;
+    always_comb begin
+        any_valid_in = 1'b0;
+        for (int i = 0; i < W; i++) any_valid_in |= slot_cmp_valid[i];
+    end
+
+    // -----------------------------------------------------------------
     // Min-reducer tree, expressed as a single always_comb so the data
     // flow (level lvl -> level lvl+1) is unambiguously acyclic from the
     // tool's perspective. Splitting this across multiple always_comb
@@ -79,40 +88,28 @@ module arrival_aggregator #(
     logic [TAG_WIDTH-1:0] tree_tag  [TREE_DEPTH+1][W];
     /* verilator lint_on UNUSED */
 
-    always_comb begin
+    logic [TREE_DEPTH+1:0] valid_pipe;
+
+    always_ff @ (posedge clk) begin
         // Level 0: copy masked inputs
         for (int i = 0; i < W; i++) begin
-            tree_dist[0][i] = masked_dist[i];
-            tree_tag [0][i] = masked_tag [i];
+            tree_dist[0][i] <= masked_dist[i];
+            tree_tag [0][i] <= masked_tag [i];
         end
-        // Default unused entries to 0 to make Verilator happy
-        for (int lvl = 1; lvl <= TREE_DEPTH; lvl++) begin
-            for (int i = 0; i < W; i++) begin
-                tree_dist[lvl][i] = '0;
-                tree_tag [lvl][i] = '0;
-            end
-        end
-        // Levels 1..TREE_DEPTH: pair-wise min reduction
-        for (int lvl = 0; lvl < TREE_DEPTH; lvl++) begin
+        valid_pipe[0] <= any_valid_in
+
+        for (int lvl = 0;lvl < TREE_DEPTH ; lvl++) begin
             for (int idx = 0; idx < (W >> (lvl + 1)); idx++) begin
                 if (tree_dist[lvl][2*idx] <= tree_dist[lvl][2*idx + 1]) begin
-                    tree_dist[lvl+1][idx] = tree_dist[lvl][2*idx];
-                    tree_tag [lvl+1][idx] = tree_tag [lvl][2*idx];
+                    tree_dist[lvl+1][idx] <= tree_dist[lvl][2*idx];
+                    tree_tag [lvl+1][idx] <= tree_tag [lvl][2*idx];
                 end else begin
-                    tree_dist[lvl+1][idx] = tree_dist[lvl][2*idx + 1];
-                    tree_tag [lvl+1][idx] = tree_tag [lvl][2*idx + 1];
+                    tree_dist[lvl+1][idx] <= tree_dist[lvl][2*idx + 1];
+                    tree_tag [lvl+1][idx] <= tree_tag [lvl][2*idx + 1];
                 end
             end
+            valid_pipe[lvl+1] <= valid_pipe[lvl];
         end
-    end
-
-    // -----------------------------------------------------------------
-    // "any input valid" OR-reduction, then register the output.
-    // -----------------------------------------------------------------
-    logic any_valid_in;
-    always_comb begin
-        any_valid_in = 1'b0;
-        for (int i = 0; i < W; i++) any_valid_in |= slot_cmp_valid[i];
     end
 
     always_ff @(posedge clk) begin
@@ -121,7 +118,7 @@ module arrival_aggregator #(
             out_min_dist <= '0;
             out_min_tag  <= '0;
         end else begin
-            out_valid    <= any_valid_in;
+            out_valid    <= any_valid_in[TREE_DEPTH];
             out_min_dist <= tree_dist[TREE_DEPTH][0];
             out_min_tag  <= tree_tag [TREE_DEPTH][0];
         end

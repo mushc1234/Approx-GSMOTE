@@ -107,58 +107,10 @@ module window_engine #(
         .out_min_tag   (agg_out_min_tag)
     );
 
-    // -----------------------------------------------------------------
-    // Pending-best register: captures the aggregator's output for the
-    // most recent arrival and holds it until consumed by the next LOAD.
-    //
-    // The aggregator's out_valid is a one-cycle pulse (registered from
-    // any_valid_in across slots), so we need to remember it between
-    // when it emerges (cycle T+LATENCY+1) and when LOAD happens
-    // (cycle T+LATENCY+2). On all subsequent cycles, the pending
-    // register holds the latest aggregation. After a LOAD consumes it,
-    // we clear the valid bit so a subsequent load without a new
-    // aggregation falls back to sentinel.
-    //
-    // The agg_out_min_tag carries {best_resident_idx, arrival_idx}.
-    // The upper half (resident_idx) is what we want for the new
-    // resident's initial best_idx.
-    // -----------------------------------------------------------------
-    logic                       pending_valid_r;
-    logic [ACC_WIDTH-1:0]       pending_dist_r;
-    logic [IDX_WIDTH-1:0]       pending_idx_r;
-    logic                       any_load;
+    logic [ACC_WIDTH-1:0]       agg_out_min_dist_v;
 
-    assign any_load = |sched_load_valid;
-
-    always_ff @(posedge clk) begin
-        if (!rst_n) begin
-            pending_valid_r <= 1'b0;
-            pending_dist_r  <= '0;
-            pending_idx_r   <= '0;
-        end else if (agg_out_valid) begin
-            // Latch the latest aggregation (priority over consumption,
-            // though in normal scheduler behaviour these don't collide).
-            pending_valid_r <= 1'b1;
-            pending_dist_r  <= agg_out_min_dist;
-            pending_idx_r   <= agg_out_min_tag[TAG_WIDTH-1:IDX_WIDTH];
-        end else if (any_load) begin
-            // Consumed; invalidate until next aggregation.
-            pending_valid_r <= 1'b0;
-        end
-    end
-
-    // -----------------------------------------------------------------
-    // Slot load_best lines: driven combinationally from the
-    // pending register, broadcast to all slots (gated by per-slot
-    // load_valid inside each slot). Falls back to sentinel/zero when
-    // no valid aggregation is available (engine start-up).
-    // -----------------------------------------------------------------
-    logic [ACC_WIDTH-1:0]       slot_load_best_dist;
-    logic [IDX_WIDTH-1:0]       slot_load_best_idx;
-
-    assign slot_load_best_dist = pending_valid_r ? pending_dist_r
-                                                      : {ACC_WIDTH{1'b1}};
-    assign slot_load_best_idx  = pending_valid_r ? pending_idx_r : '0;
+    assign agg_out_min_dist_v = agg_out_valid ? agg_out_min_dist
+                                              : {ACC_WIDTH{1'b1}};
 
     // -----------------------------------------------------------------
     // W slot instances
@@ -178,8 +130,10 @@ module window_engine #(
                 .load_valid         (sched_load_valid[s]),
                 .load_idx           (sched_load_idx),
                 .load_data          (sched_load_data),
-                .load_best_dist     (slot_load_best_dist),
-                .load_best_idx      (slot_load_best_idx),
+
+                
+                .agg_best_dist      (agg_out_min_dist_v),
+                .agg_best_tag       (agg_best_tag),
 
                 .arrival_valid      (sched_arrival_valid),
                 .arrival_idx        (sched_arrival_idx),
