@@ -88,7 +88,7 @@ module arrival_aggregator #(
     logic [TAG_WIDTH-1:0] tree_tag  [TREE_DEPTH+1][W];
     /* verilator lint_on UNUSED */
 
-    logic [TREE_DEPTH+1:0] valid_pipe;
+    logic valid_pipe [TREE_DEPTH+1]; // valid pipeline, one bit per tree level
 
     always_ff @ (posedge clk) begin
         // Level 0: copy masked inputs
@@ -96,7 +96,7 @@ module arrival_aggregator #(
             tree_dist[0][i] <= masked_dist[i];
             tree_tag [0][i] <= masked_tag [i];
         end
-        valid_pipe[0] <= any_valid_in
+        valid_pipe[0] <= any_valid_in;
 
         for (int lvl = 0;lvl < TREE_DEPTH ; lvl++) begin
             for (int idx = 0; idx < (W >> (lvl + 1)); idx++) begin
@@ -112,16 +112,10 @@ module arrival_aggregator #(
         end
     end
 
-    always_ff @(posedge clk) begin
-        if (!rst_n) begin
-            out_valid    <= 1'b0;
-            out_min_dist <= '0;
-            out_min_tag  <= '0;
-        end else begin
-            out_valid    <= any_valid_in[TREE_DEPTH];
-            out_min_dist <= tree_dist[TREE_DEPTH][0];
-            out_min_tag  <= tree_tag [TREE_DEPTH][0];
-        end
+    always_comb begin
+        out_valid    = valid_pipe[TREE_DEPTH];
+        out_min_dist = tree_dist[TREE_DEPTH][0];
+        out_min_tag  = tree_tag [TREE_DEPTH][0];
     end
 
 endmodule
