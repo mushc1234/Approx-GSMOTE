@@ -26,7 +26,7 @@
 // =====================================================================
 
 module window_engine #(
-    parameter int W              = 8,
+    parameter int W              = 4,
     parameter int D              = 32,
     parameter int IN_WIDTH       = 16,
     parameter int ACC_WIDTH      = 40,
@@ -107,10 +107,18 @@ module window_engine #(
         .out_min_tag   (agg_out_min_tag)
     );
 
-    logic [ACC_WIDTH-1:0]       agg_out_min_dist_v;
+    logic [ACC_WIDTH-1:0]       agg_out_min_dist_r;
+    logic [TAG_WIDTH-1:0]       agg_out_min_tag_r;
 
-    assign agg_out_min_dist_v = agg_out_valid ? agg_out_min_dist
-                                              : {ACC_WIDTH{1'b1}};
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            agg_out_min_dist_r <= ACC_WIDTH'(0);
+            agg_out_min_tag_r  <= '0;
+        end else if (agg_out_valid) begin
+            agg_out_min_dist_r <= agg_out_min_dist;
+            agg_out_min_tag_r  <= agg_out_min_tag;
+        end
+    end
 
     // -----------------------------------------------------------------
     // W slot instances
@@ -130,10 +138,9 @@ module window_engine #(
                 .load_valid         (sched_load_valid[s]),
                 .load_idx           (sched_load_idx),
                 .load_data          (sched_load_data),
-
                 
-                .agg_best_dist      (agg_out_min_dist_v),
-                .agg_best_tag       (agg_best_tag),
+                .agg_best_dist      (agg_out_min_dist_r),
+                .agg_best_tag       (agg_out_min_tag_r),
 
                 .arrival_valid      (sched_arrival_valid),
                 .arrival_idx        (sched_arrival_idx),

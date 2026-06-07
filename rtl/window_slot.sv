@@ -46,7 +46,6 @@ module window_slot #(
     // Aggregator inputs
     input  logic [IDX_WIDTH*2-1:0]            agg_best_tag,
     input  logic [ACC_WIDTH-1:0]              agg_best_dist,
-    input  logic                              agg_best_valid,
 
     // Arrival broadcast port
     input  logic                              arrival_valid,
@@ -89,8 +88,8 @@ module window_slot #(
 
     assign valid_cmp_dist = (cmp_valid && cmp_tag[IDX_WIDTH*2-1:IDX_WIDTH] == resident_idx) ? cmp_dist
                                                                                             : {ACC_WIDTH{1'b1}};
-    assign valid_agg_dist = (agg_best_tag[IDX_WIDTH-1:0] == resident_idx && agg_best_valid) ? agg_best_dist
-                                                                                            : {ACC_WIDTH{1'b1}};
+    assign valid_agg_dist = (agg_best_tag[IDX_WIDTH-1:0] == resident_idx) ? agg_best_dist
+                                                                          : {ACC_WIDTH{1'b1}};
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
