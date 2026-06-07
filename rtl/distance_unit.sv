@@ -22,7 +22,6 @@ module distance_unit #(
     input  logic                  rst_n,
 
     input  logic                  in_valid,
-    output logic                  in_ready,
     input  logic [D*IN_WIDTH-1:0] in_a,
     input  logic [D*IN_WIDTH-1:0] in_b,
     input  logic [TAG_WIDTH-1:0]  in_tag,
@@ -46,23 +45,20 @@ module distance_unit #(
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             active   <= 1'b0;
-            in_ready <= 1'b1;
         end else begin
-            if (in_valid && in_ready) begin
+            if (in_valid) begin
                 shift_a  <= in_a;
                 shift_b  <= in_b;
                 tag_reg  <= in_tag;
                 count    <= CYCLES[COUNTER_WIDTH-1:0];
-                active   <= 1'b1;
-                in_ready <= 1'b0; 
+                active   <= 1'b1; 
             end else if (active) begin
                 shift_a <= shift_a >> (LANES * IN_WIDTH);
                 shift_b <= shift_b >> (LANES * IN_WIDTH);
                 count   <= count - 1'b1;
                 
                 if (count == 1) begin
-                    active   <= 1'b0;
-                    in_ready <= 1'b1; 
+                    active   <= 1'b0; 
                 end
             end
         end

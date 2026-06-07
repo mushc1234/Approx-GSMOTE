@@ -28,6 +28,7 @@
 module window_engine #(
     parameter int W              = 4,
     parameter int D              = 32,
+    parameter int LANES          = 4,
     parameter int IN_WIDTH       = 16,
     parameter int ACC_WIDTH      = 40,
     parameter int IDX_WIDTH      = 16,
@@ -51,9 +52,9 @@ module window_engine #(
     output logic [ACC_WIDTH-1:0]              out_best_dist
 );
 
-    // Pipeline depth seen by the scheduler: distance unit ($clog2(D)+2)
+    // Pipeline depth seen by the scheduler: distance unit (D / LANES cycles)
     // plus one cycle for the slot's running-best register to latch.
-    localparam int SLOT_LATENCY = $clog2(D) + 3;
+    localparam int SLOT_LATENCY = D / LANES + 3;
     localparam int TAG_WIDTH    = IDX_WIDTH * 2;
 
     // -----------------------------------------------------------------
@@ -128,6 +129,7 @@ module window_engine #(
         for (s = 0; s < W; s++) begin : slot_inst
             window_slot #(
                 .D       (D),
+                .LANES   (LANES),
                 .IN_WIDTH(IN_WIDTH),
                 .ACC_WIDTH(ACC_WIDTH),
                 .IDX_WIDTH(IDX_WIDTH)
