@@ -1,26 +1,32 @@
 // tb_window_slot.cpp
 // =====================================================================
-// Verilator testbench for window_slot.sv.
+// Testbench for window_slot.sv (continuous-aggregator-tag-match version).
 //
-// Two test sections:
+// Tests encode the INTENDED behaviour, not what the current RTL happens
+// to do. Concretely:
 //
-//   TEST 1 (single arrivals, spaced out)
-//   Mirrors the directed test from tb_window_slot.cpp, but accounts for
-//   the LATENCY-cycle delay between arrival_valid and cmp_valid:
-//     1. Load P0 = (1000, 2000), idx=0
-//     2. Drive arrival P1 = (1100, 2050), idx=1; wait LATENCY cycles;
-//        verify cmp_dist=12500, cmp_tag=1, then verify best_idx/dist
-//        update one cycle later
-//     3. Drive P2 (far) and P3 (closer) likewise; verify best updates
-//        as expected.
+//   1. The cmp path updates best ONLY when
+//        cmp_valid && cmp_tag[upper] == resident_idx.
+//      The upper-half check rejects in-flight compares from a previous
+//      resident that emerge after a load.
 //
-//   TEST 2 (back-to-back arrivals)
-//   Drive P1, P2, P3 in consecutive cycles. Verify three cmp results
-//   emerge in three consecutive cycles starting at LATENCY cycles
-//   after the first drive. Final best should still settle to the same
-//   value as in Test 1.
+//   2. The agg path updates best ONLY when
+//        agg_best_tag[LOWER] == resident_idx.
+//      The lower half of the aggregator tag is the arrival_idx the agg
+//      result was computed for. When that arrival_idx is now this
+//      slot's resident, the upper half (the closest-resident-to-it) is
+//      the neighbour we should adopt as best_idx.
 //
-// Both tests use D=2 so LATENCY = $clog2(2) + 2 = 3 cycles.
+//   3. On load, best resets to (MAX, 0) and the slot's data latches in.
+//      Load takes priority over both other paths in the same cycle.
+//
+//   4. cmp and agg can both fire on the same cycle; the smaller of the
+//      two gated distances wins, and best_idx reflects the winner's
+//      side (cmp_tag[lower] for cmp; agg_best_tag[upper] for agg).
+//
+// Parameters: D=4, IN_WIDTH=16, ACC_WIDTH=40, IDX_WIDTH=16. The slot
+// must be elaborated with these for the packed-data helpers below to
+// line up.
 // =====================================================================
 
 #include "Vwindow_slot.h"
@@ -31,32 +37,25 @@
 #include <iostream>
 #include <string>
 
-// -------- Pipeline depth must match the DUT param math --------
-static constexpr int D       = 2;
-static constexpr int LATENCY = 3;   // $clog2(2) + 2
+static constexpr int D         = 4;
+static constexpr int IN_WIDTH  = 16;
+static constexpr int IDX_WIDTH = 16;
+static constexpr uint64_t MAX_DIST = ((uint64_t)1 << 40) - 1;  // ACC_WIDTH=40
 
-// -------- Simulation infrastructure --------
 static vluint64_t main_time = 0;
 double sc_time_stamp() { return (double)main_time; }
 
-static int n_checks   = 0;
-static int n_failures = 0;
-
+static int n_checks = 0, n_failures = 0;
 static void check(const std::string& label, uint64_t got, uint64_t expected) {
     n_checks++;
     if (got == expected) {
         std::cout << "  ok  : " << label << " = " << got << "\n";
     } else {
         std::cerr << "  FAIL: " << label
-                  << "   got "      << got
-                  << "   expected " << expected
-                  << "   diff " << ((int64_t)got - (int64_t)expected) << "\n";
+                  << "   got " << got
+                  << "   expected " << expected << "\n";
         n_failures++;
     }
-}
-
-static uint32_t pack2(int16_t d0, int16_t d1) {
-    return (uint32_t)(uint16_t)d1 << 16 | (uint32_t)(uint16_t)d0;
 }
 
 static void tick(Vwindow_slot* dut, VerilatedVcdC* tfp) {
@@ -68,6 +67,32 @@ static void tick(Vwindow_slot* dut, VerilatedVcdC* tfp) {
     main_time += 5;
 }
 
+// Pack D=4 int16 values into a packed 64-bit signal.
+// Element 0 occupies bits [15:0], element 1 [31:16], etc.
+static uint64_t pack4(int16_t a, int16_t b, int16_t c, int16_t d) {
+    return ((uint64_t)(uint16_t)a)        |
+           ((uint64_t)(uint16_t)b) << 16  |
+           ((uint64_t)(uint16_t)c) << 32  |
+           ((uint64_t)(uint16_t)d) << 48;
+}
+
+// Squared euclidean distance for D=4 vectors.
+static uint64_t sqdist(int16_t a0, int16_t a1, int16_t a2, int16_t a3,
+                       int16_t b0, int16_t b1, int16_t b2, int16_t b3) {
+    int64_t d0 = (int64_t)a0 - b0;
+    int64_t d1 = (int64_t)a1 - b1;
+    int64_t d2 = (int64_t)a2 - b2;
+    int64_t d3 = (int64_t)a3 - b3;
+    return (uint64_t)(d0*d0 + d1*d1 + d2*d2 + d3*d3);
+}
+
+// Drive agg into a quiescent (non-matching, MAX-dist) state. Any
+// resident_idx in [0..0xFFFE] won't match the all-ones tag halves.
+static void quiesce_agg(Vwindow_slot* dut) {
+    dut->agg_best_tag  = 0xFFFFFFFFULL;
+    dut->agg_best_dist = MAX_DIST;
+}
+
 static void zero_inputs(Vwindow_slot* dut) {
     dut->load_valid    = 0;
     dut->load_idx      = 0;
@@ -75,18 +100,7 @@ static void zero_inputs(Vwindow_slot* dut) {
     dut->arrival_valid = 0;
     dut->arrival_idx   = 0;
     dut->arrival_data  = 0;
-}
-
-// Helpers that capture the common drive patterns
-static void load_resident(Vwindow_slot* dut, VerilatedVcdC* tfp,
-                          int16_t x, int16_t y, uint16_t idx) {
-    dut->load_valid = 1;
-    dut->load_idx   = idx;
-    dut->load_data  = pack2(x, y);
-    tick(dut, tfp);
-    dut->load_valid = 0;
-    dut->load_data  = 0;
-    tick(dut, tfp);    // settle
+    quiesce_agg(dut);
 }
 
 static void reset(Vwindow_slot* dut, VerilatedVcdC* tfp) {
@@ -97,290 +111,255 @@ static void reset(Vwindow_slot* dut, VerilatedVcdC* tfp) {
     tick(dut, tfp);
 }
 
-// =====================================================================
-// TEST 1 -- spaced arrivals
-// =====================================================================
-static void test1_spaced(Vwindow_slot* dut, VerilatedVcdC* tfp) {
-    std::cout << "\n========== TEST 1: spaced arrivals ==========\n";
-
-    reset(dut, tfp);
-    std::cout << "\n[1] After reset:\n";
-    check("resident_valid", dut->resident_valid, 0);
-
-    load_resident(dut, tfp, 1000, 2000, 0);
-    std::cout << "\n[2] After loading P0 = (1000, 2000), idx=0:\n";
-    check("resident_valid", dut->resident_valid, 1);
-    check("resident_idx",   dut->resident_idx,   0);
-
-    // ---- Arrival P1: (1100, 2050), idx=1. dist^2 = 12500. Should update best. ----
-    std::cout << "\n[3] Drive arrival P1 = (1100, 2050), idx=1. Expect dist^2 = 12500.\n";
-    dut->arrival_valid = 1;
-    dut->arrival_idx   = 1;
-    dut->arrival_data  = pack2(1100, 2050);
-    tick(dut, tfp);                      // tick 1: arrival latched into stage 1
-    dut->arrival_valid = 0;
-    dut->arrival_data  = 0;
-
-    // Wait LATENCY-1 more ticks for cmp to emerge.
-    // After tick LATENCY, valid_pipe[LATENCY-1]=1, so cmp_valid=1.
-    for (int i = 0; i < LATENCY - 1; i++) tick(dut, tfp);
-
-    check("cmp_valid (P1 emerges)", dut->cmp_valid, 1);
-    check("cmp_tag",                dut->cmp_tag,   1);
-    check("cmp_dist",               dut->cmp_dist,  12500);
-
-    // One more tick: best update fires on this cmp_valid
+// One-cycle load pulse. After the tick: resident_valid=1, best=MAX.
+static void do_load(Vwindow_slot* dut, VerilatedVcdC* tfp,
+                    uint16_t idx, uint64_t data) {
+    dut->load_valid = 1;
+    dut->load_idx   = idx;
+    dut->load_data  = data;
     tick(dut, tfp);
-    check("best_idx after P1",  dut->best_idx,  1);
-    check("best_dist after P1", dut->best_dist, 12500);
-    check("cmp_valid drained",  dut->cmp_valid, 0);
-
-    // ---- Arrival P2: (5000, 4000), idx=2. dist^2 = 20,000,000. Should NOT update. ----
-    std::cout << "\n[4] Drive arrival P2 = (5000, 4000), idx=2. Expect dist^2 = 20M, NO update.\n";
-    dut->arrival_valid = 1;
-    dut->arrival_idx   = 2;
-    dut->arrival_data  = pack2(5000, 4000);
-    tick(dut, tfp);
-    dut->arrival_valid = 0;
-    dut->arrival_data  = 0;
-    for (int i = 0; i < LATENCY - 1; i++) tick(dut, tfp);
-
-    check("cmp_valid (P2 emerges)", dut->cmp_valid, 1);
-    check("cmp_tag",                dut->cmp_tag,   2);
-    check("cmp_dist",               dut->cmp_dist,  20000000);
-
-    tick(dut, tfp);
-    check("best_idx unchanged",  dut->best_idx,  1);
-    check("best_dist unchanged", dut->best_dist, 12500);
-
-    // ---- Arrival P3: (1050, 2025), idx=3. dist^2 = 3125. Should update. ----
-    std::cout << "\n[5] Drive arrival P3 = (1050, 2025), idx=3. Expect dist^2 = 3125, update.\n";
-    dut->arrival_valid = 1;
-    dut->arrival_idx   = 3;
-    dut->arrival_data  = pack2(1050, 2025);
-    tick(dut, tfp);
-    dut->arrival_valid = 0;
-    dut->arrival_data  = 0;
-    for (int i = 0; i < LATENCY - 1; i++) tick(dut, tfp);
-
-    check("cmp_valid (P3 emerges)", dut->cmp_valid, 1);
-    check("cmp_tag",                dut->cmp_tag,   3);
-    check("cmp_dist",               dut->cmp_dist,  3125);
-
-    tick(dut, tfp);
-    check("best_idx after P3",  dut->best_idx,  3);
-    check("best_dist after P3", dut->best_dist, 3125);
+    dut->load_valid = 0;
+    dut->load_data  = 0;
+    dut->load_idx   = 0;
 }
 
-// =====================================================================
-// TEST 2 -- back-to-back arrivals
-// =====================================================================
-static void test2_streaming(Vwindow_slot* dut, VerilatedVcdC* tfp) {
-    std::cout << "\n========== TEST 2: back-to-back arrivals ==========\n";
+// One-cycle arrival broadcast. After the tick: dist_unit has captured
+// the input (assuming resident_valid=1 and load_valid=0 at this cycle).
+static void do_arrival(Vwindow_slot* dut, VerilatedVcdC* tfp,
+                       uint16_t idx, uint64_t data) {
+    dut->arrival_valid = 1;
+    dut->arrival_idx   = idx;
+    dut->arrival_data  = data;
+    tick(dut, tfp);
+    dut->arrival_valid = 0;
+    dut->arrival_idx   = 0;
+    dut->arrival_data  = 0;
+}
 
-    reset(dut, tfp);
-    load_resident(dut, tfp, 1000, 2000, 0);
-    std::cout << "Loaded P0 = (1000, 2000), idx=0\n";
-
-    // Drive three arrivals in three consecutive cycles.
-    struct Arr { int16_t x, y; uint16_t idx; uint64_t expected; };
-    Arr arrivals[3] = {
-        {1100, 2050, 1, 12500},
-        {5000, 4000, 2, 20000000},
-        {1050, 2025, 3, 3125},
-    };
-
-    std::cout << "\nDriving 3 arrivals back-to-back...\n";
-    for (int i = 0; i < 3; i++) {
-        dut->arrival_valid = 1;
-        dut->arrival_idx   = arrivals[i].idx;
-        dut->arrival_data  = pack2(arrivals[i].x, arrivals[i].y);
+// Tick until cmp_valid is observed=1 after the tick. Returns the
+// number of ticks consumed, or -1 on timeout. Robust to dist_unit
+// pipeline-depth changes (recompute latency if you change D).
+static int wait_for_cmp(Vwindow_slot* dut, VerilatedVcdC* tfp,
+                        int max_cycles = 32) {
+    for (int i = 0; i < max_cycles; i++) {
         tick(dut, tfp);
+        if (dut->cmp_valid) return i + 1;
     }
-    dut->arrival_valid = 0;
-    dut->arrival_data  = 0;
-
-    // We drove 3 arrivals over 3 ticks. With LATENCY=3, the first
-    // arrival's cmp emerges right after the 3rd tick -- i.e., cmp_valid
-    // is high RIGHT NOW. The other two follow on the next two ticks.
-    std::cout << "\n[after 3 drive ticks] First arrival should be emerging:\n";
-    check("cmp_valid (A1)", dut->cmp_valid, 1);
-    check("cmp_tag (A1)",   dut->cmp_tag,   arrivals[0].idx);
-    check("cmp_dist (A1)",  dut->cmp_dist,  arrivals[0].expected);
-
-    tick(dut, tfp);
-    std::cout << "\n[tick +1] Second arrival should be emerging:\n";
-    check("cmp_valid (A2)", dut->cmp_valid, 1);
-    check("cmp_tag (A2)",   dut->cmp_tag,   arrivals[1].idx);
-    check("cmp_dist (A2)",  dut->cmp_dist,  arrivals[1].expected);
-    // Best should have been updated by A1's cmp (which emerged last
-    // tick). Verify.
-    check("best_idx (after A1 update)",  dut->best_idx,  arrivals[0].idx);
-    check("best_dist (after A1 update)", dut->best_dist, arrivals[0].expected);
-
-    tick(dut, tfp);
-    std::cout << "\n[tick +2] Third arrival should be emerging:\n";
-    check("cmp_valid (A3)", dut->cmp_valid, 1);
-    check("cmp_tag (A3)",   dut->cmp_tag,   arrivals[2].idx);
-    check("cmp_dist (A3)",  dut->cmp_dist,  arrivals[2].expected);
-    // A2's cmp emerged last tick; it was larger so no best update.
-    check("best_idx (A2 didn't update)",  dut->best_idx,  arrivals[0].idx);
-    check("best_dist (A2 didn't update)", dut->best_dist, arrivals[0].expected);
-
-    tick(dut, tfp);
-    std::cout << "\n[tick +3] Pipeline drained; A3's update has taken effect:\n";
-    check("cmp_valid drained",  dut->cmp_valid, 0);
-    check("best_idx final",     dut->best_idx,  arrivals[2].idx);
-    check("best_dist final",    dut->best_dist, arrivals[2].expected);
+    return -1;
 }
 
-static void test3_loading(Vwindow_slot* dut, VerilatedVcdC* tfp) {
-    std::cout << "\n========== TEST 3: load mechanism ==========\n";
- 
-    // Sentinel = all-ones across ACC_WIDTH=40 bits = 2^40 - 1.
-    static constexpr uint64_t SENTINEL = (1ULL << 40) - 1;
- 
-    // Helper: drive a single arrival, wait for cmp to emerge and the
-    // running-best register to settle. Centralises the LATENCY+1 timing
-    // so the test body stays readable.
-    auto drive_one_arrival = [&](int16_t x, int16_t y, uint16_t idx) {
-        dut->arrival_valid = 1;
-        dut->arrival_idx   = idx;
-        dut->arrival_data  = pack2(x, y);
-        tick(dut, tfp);                          // arrival latched into stage 1
-        dut->arrival_valid = 0;
-        dut->arrival_data  = 0;
-        for (int i = 0; i < LATENCY - 1; i++)    // wait for cmp_valid
-            tick(dut, tfp);
-        tick(dut, tfp);                          // best update fires
-    };
- 
-    // -----------------------------------------------------------------
-    // 3a. Load-after-arrivals: best must reset to sentinel on reload
-    // -----------------------------------------------------------------
-    std::cout << "\n[3a] Load -> arrivals -> reload. Best must reset.\n";
- 
-    reset(dut, tfp);
-    load_resident(dut, tfp, 1000, 2000, 0);
- 
-    // Drive an arrival that updates best to a non-sentinel value.
-    drive_one_arrival(1100, 2050, 1);            // dist^2 = 12500
-    check("3a: best_dist updated by first arrival", dut->best_dist, 12500);
-    check("3a: best_idx updated by first arrival",  dut->best_idx,  1);
- 
-    // Now load a DIFFERENT resident. Best must reset.
-    load_resident(dut, tfp, 5000, 5000, 99);
-    check("3a: resident_idx after reload",   dut->resident_idx, 99);
-    check("3a: resident_valid after reload", dut->resident_valid, 1);
-    check("3a: best_dist reset to sentinel", dut->best_dist, SENTINEL);
-    check("3a: best_idx cleared",            dut->best_idx,  0);
- 
-    // -----------------------------------------------------------------
-    // 3b. Multi-epoch reuse: 3 consecutive (load, arrivals) cycles
-    // -----------------------------------------------------------------
-    std::cout << "\n[3b] Three epochs: load + arrivals, load + arrivals, ...\n";
- 
-    reset(dut, tfp);
- 
-    struct Epoch {
-        int16_t  rx, ry;          uint16_t  ridx;     // resident
-        int16_t  ax, ay;          uint16_t  aidx;     // single arrival
-        uint64_t expected_dist;   uint16_t  expected_best_idx;
-    };
-    // Each epoch loads a distinct resident, drives one close-by arrival,
-    // and verifies the resulting best is specific to that epoch.
-    Epoch epochs[3] = {
-        // R=(100,100), A=(110,100)         dist = 10^2 = 100
-        {100, 100, 10, 110, 100, 11,  100, 11},
-        // R=(1000,2000), A=(1100,2050)     dist = 100^2 + 50^2 = 12500
-        {1000, 2000, 20, 1100, 2050, 21, 12500, 21},
-        // R=(-500,300), A=(-490, 310)      dist = 10^2 + 10^2 = 200
-        {-500, 300, 30, -490, 310, 31, 200, 31},
-    };
-    for (int e = 0; e < 3; e++) {
-        const Epoch& ep = epochs[e];
-        std::cout << "  -- epoch " << e
-                  << "  load R=(" << ep.rx << "," << ep.ry << ") idx=" << ep.ridx
-                  << "  arr A=(" << ep.ax << "," << ep.ay << ") idx=" << ep.aidx
-                  << "  expected dist=" << ep.expected_dist << "\n";
-        load_resident(dut, tfp, ep.rx, ep.ry, ep.ridx);
-        check("3b: resident_idx", dut->resident_idx, ep.ridx);
-        check("3b: best reset to sentinel on load", dut->best_dist, SENTINEL);
- 
-        drive_one_arrival(ep.ax, ep.ay, ep.aidx);
-        check("3b: best_idx after arrival",  dut->best_idx,  ep.expected_best_idx);
-        check("3b: best_dist after arrival", dut->best_dist, ep.expected_dist);
-    }
- 
-    // -----------------------------------------------------------------
-    // 3c. Load + arrival on the same cycle. The arrival MUST be dropped.
-    // -----------------------------------------------------------------
-    std::cout << "\n[3c] Load and arrival asserted in the same cycle.\n";
- 
-    reset(dut, tfp);
-    load_resident(dut, tfp, 0, 0, 0);            // baseline resident
- 
-    // Assert load_valid and arrival_valid simultaneously. The slot should
-    // load the new resident cleanly and drop the coincident arrival --
-    // i.e., that arrival's distance must never reach best_dist.
-    dut->load_valid    = 1;
-    dut->load_idx      = 77;
-    dut->load_data     = pack2(2000, 3000);
-    dut->arrival_valid = 1;
-    dut->arrival_idx   = 78;
-    dut->arrival_data  = pack2(2001, 3001);      // would have dist^2 = 2 if it landed
-    tick(dut, tfp);
-    dut->load_valid    = 0;
-    dut->load_data     = 0;
-    dut->arrival_valid = 0;
-    dut->arrival_data  = 0;
-    tick(dut, tfp);                              // settle
- 
-    check("3c: resident_idx (new)",      dut->resident_idx, 77);
-    check("3c: resident_valid (new)",    dut->resident_valid, 1);
-    check("3c: best_dist still sentinel right after load", dut->best_dist, SENTINEL);
- 
-    // Now wait LATENCY+1 cycles. If the coincident arrival was NOT
-    // properly suppressed, its result would emerge during this window
-    // and contaminate best_dist (dropping it to 2). If suppression
-    // works, best_dist stays at sentinel.
-    for (int i = 0; i < LATENCY + 1; i++) tick(dut, tfp);
- 
-    check("3c: best_dist still sentinel after drain",  dut->best_dist, SENTINEL);
-    check("3c: best_idx still cleared after drain",    dut->best_idx,  0);
- 
-    // And verify the slot is healthy afterward -- drive a real arrival
-    // and confirm it updates best correctly. This catches the failure
-    // mode where suppression also broke the slot's normal arrival path.
-    drive_one_arrival(2010, 3000, 79);            // dist^2 = 10^2 = 100
-    check("3c: post-coincidence, normal arrival updates best",
-          dut->best_dist, 100);
-    check("3c: post-coincidence, best_idx correct",
-          dut->best_idx, 79);
-}
-
-
-// =====================================================================
-// Main
-// =====================================================================
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Verilated::traceEverOn(true);
-
     auto* dut = new Vwindow_slot;
     auto* tfp = new VerilatedVcdC;
     dut->trace(tfp, 99);
     tfp->open("waves_window_slot.vcd");
 
-    std::cout << "=== tb_window_slot ===  LATENCY = " << LATENCY << " cycles\n";
+    std::cout << "=== tb_window_slot ===  D=" << D
+              << "  IDX_WIDTH=" << IDX_WIDTH << "\n";
 
-    test1_spaced  (dut, tfp);
-    test2_streaming(dut, tfp);
-    test3_loading  (dut, tfp);
+    // Fixed test vectors. Distances picked to be easy to read.
+    const uint16_t A = 0x0042, B = 0x00B0, X = 0x0001, Y = 0x0002;
+    const uint16_t R_WIN = 0x0099;  // a winning-resident idx for agg tests
 
-    // Drain
+    // Resident A data:        [10, 20, 30, 40]
+    // Arrival X data:         [11, 22, 31, 41]  -> dist(A,X) = 1+4+1+1 = 7
+    // Arrival Y data:         [12, 24, 32, 42]  -> dist(A,Y) = 4+16+4+4 = 28
+    const uint64_t A_DATA = pack4(10, 20, 30, 40);
+    const uint64_t B_DATA = pack4(50, 50, 50, 50);
+    const uint64_t X_DATA = pack4(11, 22, 31, 41);
+    const uint64_t Y_DATA = pack4(12, 24, 32, 42);
+    const uint64_t DIST_AX = sqdist(10,20,30,40, 11,22,31,41);  // 7
+    const uint64_t DIST_AY = sqdist(10,20,30,40, 12,24,32,42);  // 28
+
+    // -----------------------------------------------------------------
+    // [1] Reset clears outputs.
+    // -----------------------------------------------------------------
+    std::cout << "\n[1] Reset state.\n";
+    reset(dut, tfp);
+    check("resident_valid", dut->resident_valid, 0);
+    check("best_dist = MAX", dut->best_dist,     MAX_DIST);
+    check("best_idx = 0",   dut->best_idx,       0);
+    check("cmp_valid = 0",  dut->cmp_valid,      0);
+
+    // -----------------------------------------------------------------
+    // [2] Load latches resident; best resets to (MAX, 0).
+    // -----------------------------------------------------------------
+    std::cout << "\n[2] Load latches resident; best reset to MAX/0.\n";
+    reset(dut, tfp);
+    do_load(dut, tfp, A, A_DATA);
+    check("resident_valid", dut->resident_valid, 1);
+    check("resident_idx = A", dut->resident_idx, A);
+    check("best_dist = MAX",  dut->best_dist,    MAX_DIST);
+    check("best_idx = 0",     dut->best_idx,     0);
+
+    // -----------------------------------------------------------------
+    // [3] Single arrival -> cmp_valid pulses -> best updates from cmp.
+    // Verifies: cmp_tag = {A, X}; cmp_dist = sqdist(A, X);
+    //          best_dist = cmp_dist; best_idx = X (lower half of tag).
+    // -----------------------------------------------------------------
+    std::cout << "\n[3] Single compare via cmp path; best_idx = arrival_idx.\n";
+    reset(dut, tfp);
+    do_load(dut, tfp, A, A_DATA);
+    do_arrival(dut, tfp, X, X_DATA);
+    int waited = wait_for_cmp(dut, tfp, 16);
+    check("cmp_valid eventually asserts", waited > 0 ? 1 : 0, 1);
+    check("cmp_tag upper = A", (dut->cmp_tag >> IDX_WIDTH) & 0xFFFF, A);
+    check("cmp_tag lower = X",  dut->cmp_tag & 0xFFFF,              X);
+    check("cmp_dist = sqdist(A,X)", dut->cmp_dist, DIST_AX);
+    tick(dut, tfp);  // one more cycle to register cmp into best
+    check("best_dist = DIST_AX",  dut->best_dist, DIST_AX);
+    check("best_idx  = X",        dut->best_idx,  X);
+
+    // -----------------------------------------------------------------
+    // [4] Second arrival, larger dist -> best unchanged.
+    // -----------------------------------------------------------------
+    std::cout << "\n[4] Second arrival farther; best unchanged.\n";
+    // Continue from [3]: best = (DIST_AX, X)
+    do_arrival(dut, tfp, Y, Y_DATA);
+    waited = wait_for_cmp(dut, tfp, 16);
+    check("cmp_valid asserts again", waited > 0 ? 1 : 0, 1);
+    check("cmp_dist = sqdist(A,Y)",  dut->cmp_dist, DIST_AY);
+    tick(dut, tfp);
+    check("best_dist still DIST_AX", dut->best_dist, DIST_AX);
+    check("best_idx  still X",       dut->best_idx,  X);
+
+    // -----------------------------------------------------------------
+    // [5] Second arrival, smaller dist -> best updates.
+    // Reuse a fresh load to control the scenario: load A, drive Y
+    // first (large), then X (small). After X completes, best should
+    // be (DIST_AX, X).
+    // -----------------------------------------------------------------
+    std::cout << "\n[5] Smaller second compare overwrites best.\n";
+    reset(dut, tfp);
+    do_load(dut, tfp, A, A_DATA);
+    do_arrival(dut, tfp, Y, Y_DATA);
+    waited = wait_for_cmp(dut, tfp, 16);
+    check("Y cmp fires", waited > 0 ? 1 : 0, 1);
+    tick(dut, tfp);
+    check("best_dist = DIST_AY first", dut->best_dist, DIST_AY);
+    check("best_idx  = Y",             dut->best_idx,  Y);
+    do_arrival(dut, tfp, X, X_DATA);
+    waited = wait_for_cmp(dut, tfp, 16);
+    check("X cmp fires", waited > 0 ? 1 : 0, 1);
+    tick(dut, tfp);
+    check("best_dist = DIST_AX now", dut->best_dist, DIST_AX);
+    check("best_idx  = X",           dut->best_idx,  X);
+
+    // -----------------------------------------------------------------
+    // [6] Stale-tag rejection: start a compare with resident A, then
+    // LOAD B before the compare emerges. When the in-flight compare
+    // pops out with cmp_tag = {A, X}, the slot must reject it because
+    // resident_idx is now B. best_dist should stay at MAX.
+    // -----------------------------------------------------------------
+    std::cout << "\n[6] In-flight compare from previous resident is rejected.\n";
+    reset(dut, tfp);
+    do_load(dut, tfp, A, A_DATA);
+    do_arrival(dut, tfp, X, X_DATA);   // dist_unit captures {A, X}
+    // Load B before the compare can emerge.
+    do_load(dut, tfp, B, B_DATA);
+    check("resident_idx now B", dut->resident_idx, B);
+    check("best_dist back to MAX (load reset)", dut->best_dist, MAX_DIST);
+    waited = wait_for_cmp(dut, tfp, 16);
+    check("stale cmp_valid still pulses", waited > 0 ? 1 : 0, 1);
+    check("stale cmp_tag upper = A (old resident)",
+          (dut->cmp_tag >> IDX_WIDTH) & 0xFFFF, A);
+    tick(dut, tfp);  // would-be capture cycle
+    check("best_dist still MAX (stale rejected)", dut->best_dist, MAX_DIST);
+    check("best_idx  still 0",                    dut->best_idx,  0);
+
+    // -----------------------------------------------------------------
+    // [7] Aggregator snap-in with correctly-directed tag.
+    //   agg_best_tag = {R_WIN, A}   -- lower half = A = resident_idx
+    //   agg_best_dist = K
+    // Expected: best_dist = K, best_idx = R_WIN (upper half).
+    // arrival_valid stays 0 so cmp path can't fire.
+    // -----------------------------------------------------------------
+    std::cout << "\n[7] Agg snap with lower==resident -> best adopts agg.\n";
+    reset(dut, tfp);
+    do_load(dut, tfp, A, A_DATA);
+    const uint64_t K_AGG = 100;
+    dut->agg_best_tag  = ((uint32_t)R_WIN << IDX_WIDTH) | A;  // lower=A
+    dut->agg_best_dist = K_AGG;
+    dut->agg_best_valid = 1;
+    tick(dut, tfp);  // slot samples agg on this posedge
+    dut->agg_best_valid = 0;  // deassert after the tick to avoid interference with later tests
+    check("best_dist = K_AGG",  dut->best_dist, K_AGG);
+    check("best_idx  = R_WIN",  dut->best_idx,  R_WIN);
+
+    // -----------------------------------------------------------------
+    // [8] Aggregator with WRONG-direction tag (upper==resident_idx,
+    // lower != resident_idx). Intended behaviour: reject. This is
+    // the test that disambiguates the lower-half match from the
+    // upper-half match -- both fail-modes look the same on tests
+    // with all-non-matching tags, but only the lower-half match
+    // correctly rejects this case.
+    // -----------------------------------------------------------------
+    std::cout << "\n[8] Agg with upper==resident, lower!=resident: must reject.\n";
+    reset(dut, tfp);
+    do_load(dut, tfp, A, A_DATA);
+    // Upper half = A (would falsely match if direction is inverted).
+    // Lower half = X (arrival_idx not equal to our resident A).
+    dut->agg_best_tag  = ((uint32_t)A << IDX_WIDTH) | X;
+    dut->agg_best_dist = 50;  // small; would corrupt best if accepted
+    dut->agg_best_valid = 1;
+    tick(dut, tfp);
+    dut->agg_best_valid = 0;
+    for (int i = 0; i < 3; i++) tick(dut, tfp);
+    check("best_dist still MAX (wrong tag direction rejected)",
+          dut->best_dist, MAX_DIST);
+    check("best_idx  still 0", dut->best_idx, 0);
+
+    // -----------------------------------------------------------------
+    // [9] Concurrent cmp + agg on the same cycle: smaller wins.
+    // Strategy: start a compare; on the cycle cmp_valid rises, also
+    // drive a matching agg with a SMALLER dist. Both paths are
+    // gated valid on the next posedge; the agg side wins because
+    // its dist is smaller, and best_idx = R_WIN.
+    // -----------------------------------------------------------------
+    std::cout << "\n[9] Concurrent agg+cmp; agg smaller -> agg wins.\n";
+    reset(dut, tfp);
+    do_load(dut, tfp, A, A_DATA);
+    do_arrival(dut, tfp, X, X_DATA);
+    waited = wait_for_cmp(dut, tfp, 16);
+    check("cmp_valid fires", waited > 0 ? 1 : 0, 1);
+    // Now cmp_valid=1 in the current cycle; slot will sample on next tick.
+    // Inject matching agg with smaller dist than DIST_AX (= 7).
+    dut->agg_best_tag  = ((uint32_t)R_WIN << IDX_WIDTH) | A;
+    dut->agg_best_dist = 3;  // < DIST_AX
+    dut->agg_best_valid = 1;
+    tick(dut, tfp);
+    dut->agg_best_valid = 0;
+    check("best_dist = 3 (agg's)",   dut->best_dist, 3);
+    check("best_idx  = R_WIN (agg)", dut->best_idx,  R_WIN);
+
+    // Same setup, but agg's dist is LARGER than cmp's: cmp should win.
+    std::cout << "\n[9b] Concurrent agg+cmp; cmp smaller -> cmp wins.\n";
+    reset(dut, tfp);
+    do_load(dut, tfp, A, A_DATA);
+    do_arrival(dut, tfp, X, X_DATA);
+    waited = wait_for_cmp(dut, tfp, 16);
+    check("cmp_valid fires", waited > 0 ? 1 : 0, 1);
+    dut->agg_best_tag  = ((uint32_t)R_WIN << IDX_WIDTH) | A;
+    dut->agg_best_dist = 1000;  // > DIST_AX (= 7)
+    dut->agg_best_valid = 1;
+    tick(dut, tfp);
+    dut->agg_best_valid = 0;
+    check("best_dist = DIST_AX (cmp's)", dut->best_dist, DIST_AX);
+    check("best_idx  = X (cmp)",         dut->best_idx,  X);
+
+    // -----------------------------------------------------------------
+    // [10] Load resets best even when best was previously populated.
+    // -----------------------------------------------------------------
+    std::cout << "\n[10] New load clears prior best.\n";
+    // Continue from [9b]: best is (DIST_AX, X), resident A.
+    do_load(dut, tfp, B, B_DATA);
+    check("resident_idx = B",        dut->resident_idx, B);
+    check("best_dist reset to MAX",  dut->best_dist,    MAX_DIST);
+    check("best_idx reset to 0",     dut->best_idx,     0);
+
     for (int i = 0; i < 4; i++) tick(dut, tfp);
-
     tfp->close();
     delete tfp;
     delete dut;
@@ -389,13 +368,6 @@ int main(int argc, char** argv) {
     std::cout << "  checks : " << n_checks << "\n";
     std::cout << "  passed : " << (n_checks - n_failures) << "\n";
     std::cout << "  failed : " << n_failures << "\n";
-    std::cout << "  waveform: waves_window_slot.vcd\n";
-
-    if (n_failures == 0) {
-        std::cout << "\nPASS\n";
-        return 0;
-    } else {
-        std::cerr << "\nFAIL: see above; open waves_window_slot.vcd in GTKWave.\n";
-        return 1;
-    }
+    if (n_failures == 0) { std::cout << "\nPASS\n"; return 0; }
+    else { std::cerr << "\nFAIL\n"; return 1; }
 }

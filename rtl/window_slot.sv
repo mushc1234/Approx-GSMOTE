@@ -30,7 +30,7 @@
 // =====================================================================
 
 module window_slot #(
-    parameter int D         = 2,
+    parameter int D         = 4,
     parameter int IN_WIDTH  = 16,
     parameter int ACC_WIDTH = 40,
     parameter int IDX_WIDTH = 16
@@ -44,8 +44,9 @@ module window_slot #(
     input  logic [D*IN_WIDTH-1:0]             load_data,
 
     // Aggregator inputs
-    input  logic [IDX_WIDTH-1:0]              agg_best_tag,
+    input  logic [IDX_WIDTH*2-1:0]            agg_best_tag,
     input  logic [ACC_WIDTH-1:0]              agg_best_dist,
+    input  logic                              agg_best_valid,
 
     // Arrival broadcast port
     input  logic                              arrival_valid,
@@ -87,10 +88,9 @@ module window_slot #(
     logic [ACC_WIDTH-1:0] valid_agg_dist;
 
     assign valid_cmp_dist = (cmp_valid && cmp_tag[IDX_WIDTH*2-1:IDX_WIDTH] == resident_idx) ? cmp_dist
-                                                                                            : {ACC_WIDTH{1'b1}}
-    assign valid_agg_dist = (agg_best_tag[IDX_WIDTH*2-1:IDX_WIDTH] == resident_idx) ? agg_dist
-                                                                                    : {ACC_WIDTH{1'b1}}
-
+                                                                                            : {ACC_WIDTH{1'b1}};
+    assign valid_agg_dist = (agg_best_tag[IDX_WIDTH-1:0] == resident_idx && agg_best_valid) ? agg_best_dist
+                                                                                            : {ACC_WIDTH{1'b1}};
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
@@ -109,9 +109,9 @@ module window_slot #(
                 best_idx        <= '0; 
             end
             else if (resident_valid) begin
-                if (cmp_dist < best_dist || agg_best_dist < best_dist) begin
-                    best_dist <= (cmp_dist < agg_best_dist)? cmp_dist : agg_best_dist;
-                    best_idx  <= (cmp_dist < agg_best_dist)? cmp_tag[IDX_WIDTH-1:0] : agg_best_tag[IDX_WIDTH*2-1:IDX];
+                if (valid_cmp_dist < best_dist || valid_agg_dist < best_dist) begin
+                    best_dist <= (valid_cmp_dist < valid_agg_dist)? valid_cmp_dist : valid_agg_dist;
+                    best_idx  <= (valid_cmp_dist < valid_agg_dist)? cmp_tag[IDX_WIDTH-1:0] : agg_best_tag[IDX_WIDTH*2-1:IDX_WIDTH];
                 end
             end
         end
