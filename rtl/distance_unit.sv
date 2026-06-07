@@ -1,134 +1,128 @@
-// distance_unit.sv
+// distance_unit_folded.sv
 // =====================================================================
-// Pipelined squared Euclidean distance between two D-dim vectors.
+// Iterative (MAC-style) squared Euclidean distance between two D-dim vectors.
 //
-// This is the canonical shape of pipelined arithmetic on FPGAs:
-//   - Each "stage" of work ends with a flip-flop, isolating its timing
-//     path from the next stage. Synthesis sees short combinational paths
-//     between stages and can hit a high clock target.
-//   - Valid and any tag/metadata travel in a shift-register delay line
-//     that runs alongside the datapath, so they emerge at the same cycle
-//     as the data they describe.
-//   - Throughput is one result per cycle after the pipeline fills.
-//     Latency is the depth of the pipeline.
-//
-// Stages (one cycle each):
-//   1.  diff[k] = a[k] - b[k]                  -> diff_q[D]
-//   2.  sq[k]   = diff_q[k] * diff_q[k]        -> tree_q[0][D]
-//   3+. adder tree, halving each level         -> tree_q[lvl][D>>lvl]
-//
-// Total latency = TREE_DEPTH + 2 cycles
-//   D=8  -> 5 cycles
-//   D=16 -> 6 cycles
-//   D=32 -> 7 cycles
-//
-// Numeric reasoning is identical to the combinational version:
-//   diff: IN_WIDTH+1 signed bits   sq: 2*IN_WIDTH unsigned bits
-//   tree levels carry ACC_WIDTH unsigned bits (zero-extend on entry).
-//
-// Requires D to be a power of 2. The surrounding logic pads inputs if
-// the dataset's actual dimensionality isn't a power of 2.
+// Architecture:
+//   - Uses a folded datapath, processing `LANES` dimensions per cycle.
+//   - Captures wide inputs into shift registers and shifts them right 
+//     each cycle to feed the MAC units.
+//   - Latency = (D / LANES) cycles + 1 overhead cycle.
+//   - Requires handshaking (`in_ready` / `in_valid`) since it can no
+//     longer accept a new vector every clock cycle.
 // =====================================================================
 
 module distance_unit #(
     parameter int D         = 8,
+    parameter int LANES     = 4,      // Number of parallel squarers (MACs) per cycle
     parameter int IN_WIDTH  = 16,
     parameter int ACC_WIDTH = 40,
     parameter int TAG_WIDTH = 32
 ) (
-    input  logic                          clk,
-    input  logic                          rst_n,
+    input  logic                  clk,
+    input  logic                  rst_n,
 
-    input  logic                          in_valid,
-    input  logic [D*IN_WIDTH-1:0]         in_a,
-    input  logic [D*IN_WIDTH-1:0]         in_b,
-    input  logic [TAG_WIDTH-1:0]          in_tag,
+    // Input Interface (now requires handshaking/backpressure)
+    input  logic                  in_valid,
+    input  logic [D*IN_WIDTH-1:0] in_a,
+    input  logic [D*IN_WIDTH-1:0] in_b,
+    input  logic [TAG_WIDTH-1:0]  in_tag,
 
-    output logic                          out_valid,
-    output logic [ACC_WIDTH-1:0]          out_dist,
-    output logic [TAG_WIDTH-1:0]          out_tag
+    // Output Interface
+    output logic                  out_valid,
+    output logic [ACC_WIDTH-1:0]  out_dist,
+    output logic [TAG_WIDTH-1:0]  out_tag
 );
 
-    // Pipeline depth derived from D.  $clog2(8) = 3, $clog2(32) = 5.
-    localparam int TREE_DEPTH = $clog2(D);
-    localparam int LATENCY    = TREE_DEPTH + 2;
+    // Ensure D is cleanly divisible by LANES
+    // synthesis translate_off
+    initial begin
+        if (D % LANES != 0) $fatal(1, "D must be a multiple of LANES");
+    end
+    // synthesis translate_on
+
+    localparam int CYCLES = D / LANES;
+    localparam int COUNTER_WIDTH = $clog2(CYCLES + 1);
 
     // -----------------------------------------------------------------
-    // Stage 1: D parallel subtractions, registered.
+    // FSM and Registers
     // -----------------------------------------------------------------
-    logic signed [IN_WIDTH:0] diff_q [D];
+    typedef enum logic { IDLE, COMPUTE } state_t;
+    state_t state;
 
-    always_ff @(posedge clk) begin
-        for (int k = 0; k < D; k++) begin
-            diff_q[k] <= $signed(in_a[(k+1)*IN_WIDTH-1 -: IN_WIDTH])
-                       - $signed(in_b[(k+1)*IN_WIDTH-1 -: IN_WIDTH]);
+    logic [D*IN_WIDTH-1:0]    shift_a;
+    logic [D*IN_WIDTH-1:0]    shift_b;
+    logic [TAG_WIDTH-1:0]     tag_reg;
+    logic [ACC_WIDTH-1:0]     acc;
+    logic [COUNTER_WIDTH-1:0] count;
+
+    // -----------------------------------------------------------------
+    // Combinational Datapath (The "MAC" Chunk)
+    // -----------------------------------------------------------------
+    logic signed [IN_WIDTH:0] diff [LANES];
+    logic [ACC_WIDTH-1:0]     lane_sum;
+
+    always_comb begin
+        lane_sum = '0;
+        for (int i = 0; i < LANES; i++) begin
+            // 1. Subtract the bottom-most lanes currently in the shift register
+            diff[i] = $signed(shift_a[(i+1)*IN_WIDTH-1 -: IN_WIDTH])
+                    - $signed(shift_b[(i+1)*IN_WIDTH-1 -: IN_WIDTH]);
+            
+            // 2. Square and sum combinationally for this specific clock cycle
+            lane_sum = lane_sum + ACC_WIDTH'(diff[i] * diff[i]);
         end
     end
 
     // -----------------------------------------------------------------
-    // Stage 2: D parallel squarings, registered into the bottom of the
-    // adder tree (level 0).  Zero-extend to ACC_WIDTH at this point so
-    // subsequent additions are uniformly ACC_WIDTH wide.
-    //
-    // Stages 3..2+TREE_DEPTH: adder tree.  Level lvl reads from
-    // tree_q[lvl] (which has D>>lvl active entries) and writes
-    // tree_q[lvl+1] (D>>(lvl+1) entries) on the next clock edge.
-    //
-    // The 2-D array is over-allocated for simplicity: only D>>lvl
-    // entries of each row are written. Synthesis optimises the unused
-    // entries away. (Verilator may flag the unused entries -- if it
-    // does, suppress with lint_off UNUSED at the declaration.)
+    // Synchronous Logic & Control
     // -----------------------------------------------------------------
-    logic [ACC_WIDTH-1:0] tree_q [TREE_DEPTH+1][D];
-
-    always_ff @(posedge clk) begin
-        for (int k = 0; k < D; k++) begin
-            tree_q[0][k] <= ACC_WIDTH'(diff_q[k] * diff_q[k]);
-        end
-    end
-
-    genvar lvl, idx;
-    generate
-        for (lvl = 0; lvl < TREE_DEPTH; lvl++) begin : tree_level
-            for (idx = 0; idx < (D >> (lvl+1)); idx++) begin : tree_node
-                always_ff @(posedge clk) begin
-                    tree_q[lvl+1][idx] <= tree_q[lvl][2*idx]
-                                        + tree_q[lvl][2*idx + 1];
-                end
-            end
-        end
-    endgenerate
-
-    assign out_dist = tree_q[TREE_DEPTH][0];
-
-    // -----------------------------------------------------------------
-    // Valid and tag delay line. valid_pipe[i] holds in_valid from i+1
-    // cycles ago; tag_pipe[i] is the same for in_tag. The outputs read
-    // the LATENCY-1 slot, so they arrive aligned with out_dist.
-    //
-    // Note: we ONLY reset valid_pipe (correctness matters -- we don't
-    // want spurious out_valid asserting after reset). We don't reset
-    // tag_pipe because tag is meaningless when valid is low.
-    // -----------------------------------------------------------------
-    logic                  valid_pipe [LATENCY];
-    logic [TAG_WIDTH-1:0]  tag_pipe   [LATENCY];
-
     always_ff @(posedge clk) begin
         if (!rst_n) begin
-            for (int i = 0; i < LATENCY; i++) begin
-                valid_pipe[i] <= 1'b0;
-            end
+            state     <= IDLE;
+            out_valid <= 1'b0;
+            out_dist  <= '0;
+            out_tag   <= '0;
+            count     <= '0;
+            acc       <= '0;
         end else begin
-            valid_pipe[0] <= in_valid;
-            tag_pipe[0]   <= in_tag;
-            for (int i = 1; i < LATENCY; i++) begin
-                valid_pipe[i] <= valid_pipe[i-1];
-                tag_pipe[i]   <= tag_pipe[i-1];
-            end
+            // Default pulse assertion
+            out_valid <= 1'b0;
+
+            case (state)
+                IDLE: begin
+                    if (in_valid) begin
+                        shift_a  <= in_a;          // Snapshot inputs
+                        shift_b  <= in_b;
+                        tag_reg  <= in_tag;
+                        acc      <= '0;            // Clear the accumulator
+                        count    <= CYCLES[COUNTER_WIDTH-1:0]; 
+                        state    <= COMPUTE;
+                    end
+                end
+
+                COMPUTE: begin
+                    // Accumulate the sum from the current lanes
+                    acc <= acc + lane_sum;
+
+                    // Shift the registers right to expose the next chunk of data
+                    shift_a <= shift_a >> (LANES * IN_WIDTH);
+                    shift_b <= shift_b >> (LANES * IN_WIDTH);
+
+                    count <= count - 1'b1;
+
+                    // If we are on the last cycle of computation
+                    if (count == 1) begin
+                        out_valid <= 1'b1;
+                        // Output the running accumulator + the final chunk's sum directly 
+                        // to save an extra clock cycle of latency
+                        out_dist  <= acc + lane_sum; 
+                        out_tag   <= tag_reg;
+
+                        state     <= IDLE;
+                    end
+                end
+            endcase
         end
     end
-
-    assign out_valid = valid_pipe[LATENCY-1];
-    assign out_tag   = tag_pipe  [LATENCY-1];
 
 endmodule

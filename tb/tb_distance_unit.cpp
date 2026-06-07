@@ -1,20 +1,12 @@
-// tb_distance_unit_pipelined.cpp
+// tb_distance_unit_folded.cpp
 // =====================================================================
-// Exhaustive testbench for distance_unit_pipelined.sv.
+// Exhaustive testbench for the folded (MAC) distance_unit.sv.
 //
-// Same goldens and same N^2 pair coverage as tb_distance_unit, but the
-// pipeline means inputs and outputs are no longer in the same cycle.
-// We track in-flight items by tag: each driven input goes into a
-// per-tag expected-value map, and as outputs emerge we look them up by
-// the returned tag, check the distance, and remove the entry.
-//
-// This is the standard pattern for testing pipelined / out-of-order
-// hardware: the tag is the in-band identifier that lets the consumer
-// reconcile out_dist with in_a/in_b regardless of pipeline depth.
-//
-// We also measure observed latency from when the first input was driven
-// until the first output emerges, and report it -- handy sanity check
-// that the pipeline depth matches the parameter math.
+// Updates from the pipelined version:
+//   - Respects backpressure: waits for `in_ready` from the DUT before
+//     asserting `in_valid` and driving new data.
+//   - Drops `in_valid` immediately after data is accepted to prevent
+//     double-feeding.
 // =====================================================================
 
 #include "Vdistance_unit.h"
@@ -136,9 +128,11 @@ int main(int argc, char** argv) {
     memset((void*)dut->in_b, 0, VEC_WORDS * sizeof(uint32_t));
     for (int i = 0; i < 4; i++) tick(dut, tfp);
     dut->rst_n = 1;
+    
+    // Tick once more so the DUT can assert in_ready after coming out of reset
+    tick(dut, tfp);
 
     // ---- Drive all pairs, checking outputs as they emerge ----
-    // in_flight[tag] -> expected distance for that input
     std::unordered_map<uint32_t, uint64_t> in_flight;
     int n_checks   = 0;
     int n_failures = 0;
@@ -171,6 +165,14 @@ int main(int argc, char** argv) {
 
     for (size_t p = 0; p < pairs.size(); p++) {
         const Pair& pr = pairs[p];
+        
+        // Wait for DUT to be ready to accept new data
+        while (!dut->in_ready) {
+            dut->in_valid = 0; // Ensure we aren't asserting valid while waiting
+            tick(dut, tfp);
+            check_output();
+        }
+
         uint32_t a_buf[VEC_WORDS], b_buf[VEC_WORDS];
         pack_vec(a_buf, &data[pr.a * D]);
         pack_vec(b_buf, &data[pr.b * D]);
@@ -178,14 +180,19 @@ int main(int argc, char** argv) {
             dut->in_a[w] = a_buf[w];
             dut->in_b[w] = b_buf[w];
         }
+        
         dut->in_valid = 1;
         dut->in_tag   = (uint32_t)(p & 0xFFFFFFFFu);
 
         if (first_input_cycle < 0) first_input_cycle = g_cycle_count;
         in_flight[(uint32_t)(p & 0xFFFFFFFFu)] = pr.expected;
 
+        // Tick to register the transaction
         tick(dut, tfp);
         check_output();
+        
+        // Drop valid immediately so we don't hold it high on the next cycle
+        dut->in_valid = 0;
     }
 
     // ---- Drain pipeline ----
@@ -205,6 +212,8 @@ int main(int argc, char** argv) {
     delete tfp;
     delete dut;
 
+    // Latency calculation here will now represent the folded computation time 
+    // rather than pipeline depth.
     int observed_latency = (first_output_cycle >= 0 && first_input_cycle >= 0)
                             ? (first_output_cycle - first_input_cycle)
                             : -1;
