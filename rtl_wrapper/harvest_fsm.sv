@@ -78,7 +78,8 @@ module harvest_fsm #(
     // Compare: write if BRAM entry not valid, OR new dist < stored dist
     // -----------------------------------------------------------------
     logic [ACC_STORE_WIDTH-1:0]   lat_dist_ext;
-    assign lat_dist_ext = { {(ACC_STORE_WIDTH-ACC_WIDTH){1'b0}}, lat_dist_r };
+    // Replace the concatenation with a static cast
+    assign lat_dist_ext = ACC_STORE_WIDTH'(lat_dist_r);
 
     logic                         is_improvement;
     assign is_improvement = !bram_rd_valid_bit

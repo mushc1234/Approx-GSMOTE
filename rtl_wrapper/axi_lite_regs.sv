@@ -122,7 +122,7 @@ module axi_lite_regs #(
 
     // Decoded reg address (within low region, byte addr aligned to 4)
     logic [7:0]                      wr_reg_off;
-    assign wr_reg_off = wr_addr_r[7:0] & 8'hFC;
+    assign wr_is_bram = (rd_addr_r >= 18'h1000);
 
     /* verilator lint_off UNUSED */
     logic _unused_wr_addr = &{1'b0, wr_addr_r};
@@ -224,7 +224,7 @@ module axi_lite_regs #(
     logic [AXI_DATA_WIDTH-1:0]       rd_data_r;
 
     logic                            rd_is_bram;
-    assign rd_is_bram = rd_addr_r[12];
+    assign rd_is_bram = (wr_addr_r >= 18'h1000);
 
     logic [7:0]                      rd_reg_off;
     assign rd_reg_off = rd_addr_r[7:0] & 8'hFC;
@@ -302,9 +302,12 @@ module axi_lite_regs #(
 
     // BRAM port B drive: assert b_rd_en in AR_IDLE-cycle when ar accepted.
     // The handshake captures the address in the same cycle as accept.
-    assign bram_b_rd_en    = (ar_state_r == AR_IDLE) && s_axi_arvalid
-                              && s_axi_araddr[12];
-    assign bram_b_rd_entry = s_axi_araddr[N_MAX_LOG2+3:4];
+    assign bram_b_rd_en = (ar_state_r == AR_IDLE) && s_axi_arvalid && (s_axi_araddr >= 18'h1000);
+    
+    logic [AXI_ADDR_WIDTH-1:0] bram_offset;
+    assign bram_offset = s_axi_araddr - 18'h1000;
+    assign bram_b_rd_entry = bram_offset[N_MAX_LOG2+3:4];
+    
     assign bram_b_rd_word  = s_axi_araddr[3:2];
 
 endmodule

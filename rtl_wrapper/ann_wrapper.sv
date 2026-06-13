@@ -19,7 +19,7 @@
 // =====================================================================
 
 module ann_wrapper #(
-    parameter int W              = 4,
+    parameter int W              = 8,
     parameter int D              = 8,
     parameter int LANES          = 4,
     parameter int IN_WIDTH       = 16,
@@ -32,13 +32,7 @@ module ann_wrapper #(
 
     parameter int AXI_LITE_ADDR_W = 18,    // covers 0x0000..0x3FFFF (256K BRAM window)
     parameter int AXI_ADDR_W      = 32,
-    parameter int AXI_DATA_W      = 32,
-
-    // Derived: AXI beats per record on the read bus.
-    // Record layout = {2B id, 2B pad, D*IN_WIDTH/8 B data}.
-    // Bytes = 4 + D*IN_WIDTH/8 ; beats = ceil(bytes / (AXI_DATA_W/8)).
-    parameter int RECORD_BYTES   = 4 + (D * IN_WIDTH) / 8,
-    parameter int BEATS_PER_REC  = (RECORD_BYTES + (AXI_DATA_W/8) - 1) / (AXI_DATA_W/8)
+    parameter int AXI_DATA_W      = 32
 ) (
     input  logic                          clk,
     input  logic                          rst_n,
@@ -76,6 +70,12 @@ module ann_wrapper #(
     input  logic                          m_axi_rlast,
     input  logic [1:0]                    m_axi_rresp
 );
+
+    // Derived: AXI beats per record on the read bus.
+    // Record layout = {2B id, 2B pad, D*IN_WIDTH/8 B data}.
+    // Bytes = 4 + D*IN_WIDTH/8 ; beats = ceil(bytes / (AXI_DATA_W/8)).
+    localparam  RECORD_BYTES   = 4 + (D * IN_WIDTH) / 8;
+    localparam  BEATS_PER_REC  = (RECORD_BYTES + (AXI_DATA_W/8) - 1) / (AXI_DATA_W/8);
 
     // -----------------------------------------------------------------
     // Control plane signals

@@ -76,7 +76,8 @@ module result_bram #(
     localparam int BEST_HI     = 80 + IDX_WIDTH - 1;
     localparam int VALID_BIT   = 96;
 
-    logic [ENTRY_W-1:0] mem [(1<<N_MAX_LOG2)];
+    logic [ENTRY_W-1:0] mem       [0:(1<<N_MAX_LOG2)-1]; 
+    logic               mem_valid [0:(1<<N_MAX_LOG2)-1];
 
     // -----------------------------------------------------------------
     // Port A read: registered (one-cycle latency, BRAM-style)
@@ -84,11 +85,12 @@ module result_bram #(
     logic [ENTRY_W-1:0] a_rd_word;
 
     always_ff @(posedge clk) begin
-        a_rd_word <= mem[a_rd_addr];
+        a_rd_word      <= mem[a_rd_addr];
+        a_rd_valid_bit <= mem_valid[a_rd_addr]; 
     end
+    // Remove a_rd_valid_bit from the always_comb block below it
 
     always_comb begin
-        a_rd_valid_bit    = a_rd_word[VALID_BIT];
         a_rd_resident_idx = a_rd_word[RESIDENT_HI:RESIDENT_LO];
         a_rd_best_idx     = a_rd_word[BEST_HI:BEST_LO];
         a_rd_best_dist    = a_rd_word[DIST_HI:DIST_LO];
@@ -99,13 +101,15 @@ module result_bram #(
     // -----------------------------------------------------------------
     always_ff @(posedge clk) begin
         if (a_wr_full_en) begin
+            // Write data to main memory
             mem[a_wr_addr][DIST_HI:DIST_LO]         <= a_wr_best_dist;
             mem[a_wr_addr][RESIDENT_HI:RESIDENT_LO] <= a_wr_resident_idx;
             mem[a_wr_addr][BEST_HI:BEST_LO]         <= a_wr_best_idx;
-            mem[a_wr_addr][VALID_BIT]               <= a_wr_valid_bit;
+            // Write flag to valid memory
+            mem_valid[a_wr_addr]                    <= a_wr_valid_bit;
         end
         else if (a_wr_valid_en) begin
-            mem[a_wr_addr][VALID_BIT] <= a_wr_valid_bit;
+            mem_valid[a_wr_addr] <= a_wr_valid_bit;
         end
     end
 
@@ -115,12 +119,14 @@ module result_bram #(
     logic [ENTRY_W-1:0] b_rd_word_r;
     logic [1:0]         b_rd_word_sel_r;
     logic               b_rd_en_r;
+    logic               b_rd_valid_r;
 
     always_ff @(posedge clk) begin
         b_rd_en_r       <= b_rd_en;
         b_rd_word_sel_r <= b_rd_word;
         if (b_rd_en) begin
             b_rd_word_r <= mem[b_rd_entry];
+            b_rd_valid_r <= mem_valid[b_rd_entry]; // Add this line
         end
     end
 
@@ -132,13 +138,9 @@ module result_bram #(
             2'd1: b_rd_data = {16'b0, b_rd_word_r[47:32]};
             2'd2: b_rd_data = {b_rd_word_r[BEST_HI:BEST_LO],
                                b_rd_word_r[RESIDENT_HI:RESIDENT_LO]};
-            2'd3: b_rd_data = {31'b0, b_rd_word_r[VALID_BIT]};
+            2'd3: b_rd_data = {31'b0, b_rd_valid_r};
             default: b_rd_data = '0;
         endcase
     end
-
-    /* verilator lint_off UNUSED */
-    logic _unused_rst = &{1'b0, rst_n, b_rd_en_r};
-    /* verilator lint_on UNUSED */
 
 endmodule
