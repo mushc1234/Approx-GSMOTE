@@ -33,13 +33,13 @@
 #include <string>
 #include <vector>
 
-static constexpr int W              = 4;
+static constexpr int W              = 8;
 static constexpr int D              = 8;
 static constexpr int IN_WIDTH       = 16;
 static constexpr int IDX_WIDTH      = 16;
-static constexpr int N_MAX_LOG2     = 8;
+static constexpr int N_MAX_LOG2     = 10;
 static constexpr int N_MAX          = 1 << N_MAX_LOG2;
-static constexpr int N_POINTS       = 300;
+static constexpr int N_POINTS       = 312;
 static constexpr int RECORD_BYTES   = 4 + (D * IN_WIDTH / 8);   // 20
 static constexpr int BEATS_PER_REC  = (RECORD_BYTES + 3) / 4;   // 5
 static constexpr uint32_t POINTS_BASE = 0x1000'0000;

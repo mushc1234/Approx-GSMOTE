@@ -14,7 +14,7 @@ VERILATOR := verilator
 VFLAGS    := --cc --exe --build -j 1 --trace -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY
 
 # Default parameter overrides
-PARAMS := -GW=4 -GD=8 -GN_MAX_LOG2=8
+PARAMS := -GW=8 -GD=8 -GN_MAX_LOG2=10
 GOLDEN ?= ./golden
 ENG_GOLDEN ?= $(GOLDEN)
 

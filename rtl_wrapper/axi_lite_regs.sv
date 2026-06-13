@@ -89,6 +89,8 @@ module axi_lite_regs #(
     input  logic [31:0]                   bram_b_rd_data
 );
 
+    localparam logic [AXI_ADDR_WIDTH-1:0] BRAM_BASE = AXI_ADDR_WIDTH'('h1000);
+
     // -----------------------------------------------------------------
     // Register file
     // -----------------------------------------------------------------
@@ -118,11 +120,11 @@ module axi_lite_regs #(
 
     // High-region bit: bit 12 selects BRAM window.
     logic                            wr_is_bram;
-    assign wr_is_bram = wr_addr_r[12];
+    assign wr_is_bram = (wr_addr_r >= BRAM_BASE);
 
     // Decoded reg address (within low region, byte addr aligned to 4)
     logic [7:0]                      wr_reg_off;
-    assign wr_is_bram = (rd_addr_r >= 18'h1000);
+    assign wr_reg_off = wr_addr_r[7:0] & 8'hFC;
 
     /* verilator lint_off UNUSED */
     logic _unused_wr_addr = &{1'b0, wr_addr_r};
@@ -224,7 +226,7 @@ module axi_lite_regs #(
     logic [AXI_DATA_WIDTH-1:0]       rd_data_r;
 
     logic                            rd_is_bram;
-    assign rd_is_bram = (wr_addr_r >= 18'h1000);
+    assign rd_is_bram = (rd_addr_r >= BRAM_BASE);
 
     logic [7:0]                      rd_reg_off;
     assign rd_reg_off = rd_addr_r[7:0] & 8'hFC;
@@ -268,10 +270,9 @@ module axi_lite_regs #(
                 AR_IDLE: begin
                     if (s_axi_arvalid) begin
                         rd_addr_r <= s_axi_araddr;
-                        if (s_axi_araddr[12]) begin
+                        if (s_axi_araddr >= BRAM_BASE) begin // Fixed: Replaced [12]
                             ar_state_r <= AR_BRAM_WAIT_1;
                         end else begin
-                            // Register read: one cycle to settle reg_read_data
                             ar_state_r <= AR_BRAM_WAIT_2;
                         end
                     end
@@ -302,10 +303,10 @@ module axi_lite_regs #(
 
     // BRAM port B drive: assert b_rd_en in AR_IDLE-cycle when ar accepted.
     // The handshake captures the address in the same cycle as accept.
-    assign bram_b_rd_en = (ar_state_r == AR_IDLE) && s_axi_arvalid && (s_axi_araddr >= 18'h1000);
+    assign bram_b_rd_en = (ar_state_r == AR_IDLE) && s_axi_arvalid && (s_axi_araddr >= BRAM_BASE);
     
     logic [AXI_ADDR_WIDTH-1:0] bram_offset;
-    assign bram_offset = s_axi_araddr - 18'h1000;
+    assign bram_offset = s_axi_araddr - BRAM_BASE;
     assign bram_b_rd_entry = bram_offset[N_MAX_LOG2+3:4];
     
     assign bram_b_rd_word  = s_axi_araddr[3:2];
