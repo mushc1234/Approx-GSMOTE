@@ -31,6 +31,7 @@
 
 module window_slot #(
     parameter int D         = 4,
+    parameter int LANES     = 4,
     parameter int IN_WIDTH  = 16,
     parameter int ACC_WIDTH = 40,
     parameter int IDX_WIDTH = 16
@@ -68,6 +69,7 @@ module window_slot #(
 
     distance_unit #(
         .D(D),
+        .LANES(LANES),
         .IN_WIDTH(IN_WIDTH),
         .ACC_WIDTH(ACC_WIDTH),
         .TAG_WIDTH(IDX_WIDTH*2)
