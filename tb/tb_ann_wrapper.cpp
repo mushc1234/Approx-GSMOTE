@@ -37,7 +37,7 @@ static constexpr int W              = 8;
 static constexpr int D              = 8;
 static constexpr int IN_WIDTH       = 16;
 static constexpr int IDX_WIDTH      = 16;
-static constexpr int N_MAX_LOG2     = 10;
+static constexpr int N_MAX_LOG2     = 12;
 static constexpr int N_MAX          = 1 << N_MAX_LOG2;
 static constexpr int N_POINTS       = 312;
 static constexpr int RECORD_BYTES   = 4 + (D * IN_WIDTH / 8);   // 20
@@ -421,12 +421,21 @@ int main(int argc, char** argv) {
     int exact_match = 0;
     int valid_count = 0;
     int dist_ratio_le_2 = 0;
+    
+    std::cout << "\n=== Retrieved Results vs Brute Force ===\n";
+    
     for (int i = 0; i < N_POINTS; i++) {
         ResultEntry r = read_result(dut, tfp, i);
         if (r.valid) {
             valid_count++;
             check("entry " + std::to_string(i) + " resident_idx",
                   r.res, (uint64_t)i);
+                  
+            // Output the retrieved result and compare it side-by-side with brute force
+            std::cout << "  Pt " << i 
+                      << " | HW NN: " << r.best << " (dist: " << r.dist << ")"
+                      << " | BF NN: " << bf_nn[i] << " (dist: " << bf_dist[i] << ")\n";
+
             // Compare best_dist to brute force
             if ((int)r.best == bf_nn[i] && r.dist == bf_dist[i]) {
                 exact_match++;
@@ -434,6 +443,8 @@ int main(int argc, char** argv) {
             if (bf_dist[i] != 0 && r.dist <= 2 * bf_dist[i]) {
                 dist_ratio_le_2++;
             }
+        } else {
+            std::cout << "  Pt " << i << " | INVALID (Not harvested)\n";
         }
     }
 
