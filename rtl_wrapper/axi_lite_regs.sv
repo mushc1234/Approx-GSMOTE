@@ -301,14 +301,14 @@ module axi_lite_regs #(
     assign s_axi_rresp   = 2'b00;
     assign s_axi_rdata   = rd_data_r;
 
-    // BRAM port B drive: assert b_rd_en in AR_IDLE-cycle when ar accepted.
-    // The handshake captures the address in the same cycle as accept.
-    assign bram_b_rd_en = (ar_state_r == AR_IDLE) && s_axi_arvalid && (s_axi_araddr >= BRAM_BASE);
+    // BRAM port B drive: assert b_rd_en in AR_BRAM_WAIT_1 using the REGISTERED address.
+    assign bram_b_rd_en = (ar_state_r == AR_BRAM_WAIT_1) && (rd_addr_r >= BRAM_BASE);
     
     logic [AXI_ADDR_WIDTH-1:0] bram_offset;
-    assign bram_offset = s_axi_araddr - BRAM_BASE;
-    assign bram_b_rd_entry = bram_offset[N_MAX_LOG2+3:4];
     
-    assign bram_b_rd_word  = s_axi_araddr[3:2];
+    // CRITICAL: Use rd_addr_r, NOT s_axi_araddr!
+    assign bram_offset     = rd_addr_r - BRAM_BASE;
+    assign bram_b_rd_entry = bram_offset[N_MAX_LOG2+3:4];
+    assign bram_b_rd_word  = rd_addr_r[3:2];
 
 endmodule
