@@ -123,8 +123,8 @@ module result_bram #(
 
     always_ff @(posedge clk) begin
         b_rd_en_r       <= b_rd_en;
-        b_rd_word_sel_r <= b_rd_word;
         if (b_rd_en) begin
+            b_rd_word_sel_r <= b_rd_word;
             b_rd_word_r <= mem[b_rd_entry];
             b_rd_valid_r <= mem_valid[b_rd_entry]; // Add this line
         end
