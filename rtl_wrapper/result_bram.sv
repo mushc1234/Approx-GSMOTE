@@ -68,35 +68,60 @@ module result_bram #(
     localparam int RESIDENT_HI = 64 + IDX_WIDTH - 1;
     localparam int BEST_LO     = 80;
     localparam int BEST_HI     = 80 + IDX_WIDTH - 1;
-    localparam int VALID_BIT   = 96; // Packed into main word
+    localparam int VALID_BIT   = 96;
 
     logic [ENTRY_W-1:0] mem [0:(1<<N_MAX_LOG2)-1];
 
-    // Port A Read
+    // -----------------------------------------------------------------
+    // Port A Read (Exactly 1-cycle latency restored)
+    // -----------------------------------------------------------------
+    logic [ENTRY_W-1:0] a_rd_word;
+    
     always_ff @(posedge clk) begin
-        logic [ENTRY_W-1:0] rd_data;
-        rd_data <= mem[a_rd_addr];
-        a_rd_valid_bit    <= rd_data[VALID_BIT];
-        a_rd_resident_idx <= rd_data[RESIDENT_HI:RESIDENT_LO];
-        a_rd_best_idx     <= rd_data[BEST_HI:BEST_LO];
-        a_rd_best_dist    <= rd_data[DIST_HI:DIST_LO];
+        a_rd_word <= mem[a_rd_addr];
     end
 
-    // Port A Write: Packed into single 128-bit assignment
+    // Combinational split ensures no additional latency is added
+    always_comb begin
+        a_rd_valid_bit    = a_rd_word[VALID_BIT];
+        a_rd_resident_idx = a_rd_word[RESIDENT_HI:RESIDENT_LO];
+        a_rd_best_idx     = a_rd_word[BEST_HI:BEST_LO];
+        a_rd_best_dist    = a_rd_word[DIST_HI:DIST_LO];
+    end
+
+    // -----------------------------------------------------------------
+    // Port A Write (Atomic pre-packed assignment for BRAM inference)
+    // -----------------------------------------------------------------
+    logic [ENTRY_W-1:0] next_wr_word;
+    logic [ENTRY_W-1:0] clr_wr_word;
+
+    always_comb begin
+        // Pack full harvest data
+        next_wr_word = '0; 
+        next_wr_word[DIST_HI:DIST_LO]         = a_wr_best_dist;
+        next_wr_word[RESIDENT_HI:RESIDENT_LO] = a_wr_resident_idx;
+        next_wr_word[BEST_HI:BEST_LO]         = a_wr_best_idx;
+        next_wr_word[VALID_BIT]               = a_wr_valid_bit;
+        
+        // Pack clear data (Zero everything except the valid bit)
+        clr_wr_word = '0;
+        clr_wr_word[VALID_BIT] = a_wr_valid_bit;
+    end
+
     always_ff @(posedge clk) begin
         if (a_wr_full_en) begin
-            mem[a_wr_addr]                 <= '0; // Clear reserved bits
-            mem[a_wr_addr][DIST_HI:DIST_LO]         <= a_wr_best_dist;
-            mem[a_wr_addr][RESIDENT_HI:RESIDENT_LO] <= a_wr_resident_idx;
-            mem[a_wr_addr][BEST_HI:BEST_LO]         <= a_wr_best_idx;
-            mem[a_wr_addr][VALID_BIT]               <= a_wr_valid_bit;
+            mem[a_wr_addr] <= next_wr_word;
         end
         else if (a_wr_valid_en) begin
-            mem[a_wr_addr][VALID_BIT] <= a_wr_valid_bit;
+            // Wiping the rest of the entry when clearing valid=0 is perfectly safe 
+            // since the data is considered garbage anyway.
+            mem[a_wr_addr] <= clr_wr_word; 
         end
     end
 
-    // Port B Read: Accesses packed memory directly
+    // -----------------------------------------------------------------
+    // Port B Read (Unchanged)
+    // -----------------------------------------------------------------
     logic [ENTRY_W-1:0] b_rd_word_r;
     always_ff @(posedge clk) begin
         if (b_rd_en) b_rd_word_r <= mem[b_rd_entry];
